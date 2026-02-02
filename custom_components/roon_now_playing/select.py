@@ -59,8 +59,8 @@ async def async_setup_entry(
     """Set up select entities from a config entry."""
     coordinator: RoonNowPlayingCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # Track which clients we've added entities for
-    tracked_clients: set[str] = set()
+    # Track which friendly names we've added entities for (prevents duplicates on reconnect)
+    tracked_names: set[str] = set()
 
     @callback
     def async_add_new_entities() -> None:
@@ -68,11 +68,12 @@ async def async_setup_entry(
         new_entities = []
 
         for client_id, client in coordinator.clients.items():
-            if client_id not in tracked_clients:
-                tracked_clients.add(client_id)
+            friendly_name = client.get("friendlyName")
+            if friendly_name and friendly_name not in tracked_names:
+                tracked_names.add(friendly_name)
                 for description in SELECT_TYPES:
                     new_entities.append(
-                        RoonNowPlayingSelect(coordinator, client_id, description)
+                        RoonNowPlayingSelect(coordinator, friendly_name, description)
                     )
 
         if new_entities:
@@ -98,27 +99,30 @@ class RoonNowPlayingSelect(
     def __init__(
         self,
         coordinator: RoonNowPlayingCoordinator,
-        client_id: str,
+        friendly_name: str,
         description: RoonNowPlayingSelectDescription,
     ) -> None:
         """Initialize the select entity."""
         super().__init__(coordinator)
-        self._client_id = client_id
+        self._friendly_name = friendly_name
         self.entity_description = description
-        self._attr_unique_id = f"{client_id}_{description.key}"
+        # Use friendly_name for unique_id to survive reconnects with new client_id
+        self._attr_unique_id = f"{friendly_name.lower().replace(' ', '_')}_{description.key}"
 
     @property
     def _client(self) -> dict | None:
-        """Return the client data."""
-        return self.coordinator._clients.get(self._client_id)
+        """Return the client data by friendly name (survives reconnects)."""
+        for client in self.coordinator._clients.values():
+            if client.get("friendlyName") == self._friendly_name:
+                return client
+        return None
 
     @property
     def device_info(self) -> DeviceInfo:
         """Return device info."""
-        client = self._client or {}
         return DeviceInfo(
-            identifiers={(DOMAIN, self._client_id)},
-            name=client.get("friendlyName", f"Display {self._client_id[:8]}"),
+            identifiers={(DOMAIN, self._friendly_name)},
+            name=self._friendly_name,
             manufacturer="Roon Now Playing",
             model="Display Screen",
         )
@@ -157,19 +161,27 @@ class RoonNowPlayingSelect(
 
     async def async_select_option(self, option: str) -> None:
         """Change the selected option."""
+        client = self._client
+        if not client:
+            return
+
+        client_id = client.get("clientId")
+        if not client_id:
+            return
+
         key = self.entity_description.key
 
         if key == "layout":
             await self.coordinator.async_push_settings(
-                self._client_id, layout=option
+                client_id, layout=option
             )
         elif key == "font":
             await self.coordinator.async_push_settings(
-                self._client_id, font=option
+                client_id, font=option
             )
         elif key == "background":
             await self.coordinator.async_push_settings(
-                self._client_id, background=option
+                client_id, background=option
             )
         elif key == "zone":
             # Find zone ID from name
@@ -180,5 +192,5 @@ class RoonNowPlayingSelect(
                     break
             if zone_id:
                 await self.coordinator.async_push_settings(
-                    self._client_id, zone_id=zone_id
+                    client_id, zone_id=zone_id
                 )

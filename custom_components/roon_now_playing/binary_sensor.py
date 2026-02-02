@@ -23,8 +23,8 @@ async def async_setup_entry(
     """Set up binary sensors from a config entry."""
     coordinator: RoonNowPlayingCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # Track which clients we've added entities for
-    tracked_clients: set[str] = set()
+    # Track which friendly names we've added entities for (prevents duplicates on reconnect)
+    tracked_names: set[str] = set()
 
     @callback
     def async_add_new_entities() -> None:
@@ -32,10 +32,11 @@ async def async_setup_entry(
         new_entities = []
 
         for client_id, client in coordinator.clients.items():
-            if client_id not in tracked_clients:
-                tracked_clients.add(client_id)
+            friendly_name = client.get("friendlyName")
+            if friendly_name and friendly_name not in tracked_names:
+                tracked_names.add(friendly_name)
                 new_entities.append(
-                    RoonNowPlayingConnectedSensor(coordinator, client_id)
+                    RoonNowPlayingConnectedSensor(coordinator, client_id, friendly_name)
                 )
 
         if new_entities:
@@ -63,24 +64,29 @@ class RoonNowPlayingConnectedSensor(
         self,
         coordinator: RoonNowPlayingCoordinator,
         client_id: str,
+        friendly_name: str,
     ) -> None:
         """Initialize the binary sensor."""
         super().__init__(coordinator)
         self._client_id = client_id
-        self._attr_unique_id = f"{client_id}_connected"
+        self._friendly_name = friendly_name
+        # Use friendly_name for unique_id to survive reconnects with new client_id
+        self._attr_unique_id = f"{friendly_name.lower().replace(' ', '_')}_connected"
 
     @property
     def _client(self) -> dict | None:
-        """Return the client data."""
-        return self.coordinator._clients.get(self._client_id)
+        """Return the client data by friendly name (survives reconnects)."""
+        for client in self.coordinator._clients.values():
+            if client.get("friendlyName") == self._friendly_name:
+                return client
+        return None
 
     @property
     def device_info(self) -> DeviceInfo:
         """Return device info."""
-        client = self._client or {}
         return DeviceInfo(
-            identifiers={(DOMAIN, self._client_id)},
-            name=client.get("friendlyName", f"Display {self._client_id[:8]}"),
+            identifiers={(DOMAIN, self._friendly_name)},
+            name=self._friendly_name,
             manufacturer="Roon Now Playing",
             model="Display Screen",
         )
