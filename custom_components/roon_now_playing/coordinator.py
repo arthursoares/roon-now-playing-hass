@@ -129,9 +129,18 @@ class RoonNowPlayingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # New client connected
             client = data.get("client", {})
             client_id = client.get("clientId")
+            friendly_name = client.get("friendlyName")
             if client_id:
+                # Remove old disconnected entries with same friendlyName
+                if friendly_name:
+                    old_ids = [
+                        cid for cid, c in self._clients.items()
+                        if c.get("friendlyName") == friendly_name and c.get("_disconnected")
+                    ]
+                    for old_id in old_ids:
+                        del self._clients[old_id]
                 self._clients[client_id] = client
-                _LOGGER.debug("Client connected: %s", client.get("friendlyName", client_id))
+                _LOGGER.debug("Client connected: %s", friendly_name or client_id)
 
         elif msg_type == "client_disconnected":
             # Client disconnected

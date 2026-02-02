@@ -75,11 +75,19 @@ class RoonNowPlayingConnectedSensor(
 
     @property
     def _client(self) -> dict | None:
-        """Return the client data by friendly name (survives reconnects)."""
-        for client in self.coordinator._clients.values():
-            if client.get("friendlyName") == self._friendly_name:
+        """Return the client data by friendly name (prefers connected clients)."""
+        matching_clients = [
+            client for client in self.coordinator._clients.values()
+            if client.get("friendlyName") == self._friendly_name
+        ]
+        if not matching_clients:
+            return None
+        # Prefer connected clients over disconnected ones
+        for client in matching_clients:
+            if not client.get("_disconnected", False):
                 return client
-        return None
+        # All are disconnected, return the first one
+        return matching_clients[0]
 
     @property
     def device_info(self) -> DeviceInfo:
