@@ -4,12 +4,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from urllib.parse import urlparse
 
 import aiohttp
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -86,17 +87,25 @@ class RoonNowPlayingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _connect_and_listen(self, session: aiohttp.ClientSession) -> None:
         """Connect to WebSocket and listen for messages."""
-        ws_url = f"{self.host.replace('http', 'ws')}/ws?admin=true"
+        parsed = urlparse(self.host)
+        ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+        ws_url = f"{ws_scheme}://{parsed.netloc}/ws?admin=true"
         _LOGGER.info("Connecting to %s", ws_url)
 
-        async with session.ws_connect(ws_url) as ws:
+        async with session.ws_connect(
+            ws_url,
+            timeout=aiohttp.ClientTimeout(total=30)
+        ) as ws:
             self._ws = ws
             self._connected = True
             _LOGGER.info("WebSocket connected")
 
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
-                    await self._handle_message(msg.json())
+                    try:
+                        await self._handle_message(msg.json())
+                    except ValueError as err:
+                        _LOGGER.warning("Failed to parse WebSocket message: %s", err)
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     _LOGGER.error("WebSocket error: %s", ws.exception())
                     break
