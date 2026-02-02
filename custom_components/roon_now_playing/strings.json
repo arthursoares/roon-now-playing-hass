@@ -1,0 +1,20 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Roon Now Playing",
+        "description": "Enter the URL of your Roon Now Playing server.",
+        "data": {
+          "host": "Server URL"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to server. Please check the URL and ensure the server is running.",
+      "unknown": "Unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This server is already configured."
+    }
+  }
+}
