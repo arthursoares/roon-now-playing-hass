@@ -1,4 +1,5 @@
 """Binary sensor platform for Roon Now Playing."""
+
 from __future__ import annotations
 
 from homeassistant.components.binary_sensor import (
@@ -13,6 +14,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import RoonNowPlayingCoordinator
+from .identity import async_track_device_removals, device_identifier, entity_unique_id
 
 
 async def async_setup_entry(
@@ -23,20 +25,20 @@ async def async_setup_entry(
     """Set up binary sensors from a config entry."""
     coordinator: RoonNowPlayingCoordinator = hass.data[DOMAIN][entry.entry_id]
 
-    # Track which friendly names we've added entities for (prevents duplicates on reconnect)
-    tracked_names: set[str] = set()
+    tracked_devices: set[str] = set()
+    async_track_device_removals(hass, entry, tracked_devices)
 
     @callback
     def async_add_new_entities() -> None:
-        """Add entities for new named clients."""
+        """Add entities for new stable display identities."""
         new_entities = []
 
-        for client_id, client in coordinator.clients.items():
+        for screen_id, client in coordinator.ready_displays.items():
             friendly_name = client.get("friendlyName")
-            if friendly_name and friendly_name not in tracked_names:
-                tracked_names.add(friendly_name)
+            if screen_id not in tracked_devices:
+                tracked_devices.add(screen_id)
                 new_entities.append(
-                    RoonNowPlayingConnectedSensor(coordinator, client_id, friendly_name)
+                    RoonNowPlayingConnectedSensor(coordinator, screen_id, friendly_name)
                 )
 
         if new_entities:
@@ -46,9 +48,7 @@ async def async_setup_entry(
     async_add_new_entities()
 
     # Listen for new clients
-    entry.async_on_unload(
-        coordinator.async_add_listener(async_add_new_entities)
-    )
+    entry.async_on_unload(coordinator.async_add_listener(async_add_new_entities))
 
 
 class RoonNowPlayingConnectedSensor(
@@ -63,38 +63,33 @@ class RoonNowPlayingConnectedSensor(
     def __init__(
         self,
         coordinator: RoonNowPlayingCoordinator,
-        client_id: str,
+        screen_id: str,
         friendly_name: str,
     ) -> None:
         """Initialize the binary sensor."""
         super().__init__(coordinator)
-        self._client_id = client_id
+        self._screen_id = screen_id
         self._friendly_name = friendly_name
-        # Use friendly_name for unique_id to survive reconnects with new client_id
-        self._attr_unique_id = f"{friendly_name.lower().replace(' ', '_')}_connected"
+        self._attr_unique_id = entity_unique_id(
+            coordinator.entry.entry_id, screen_id, "connected"
+        )
 
     @property
     def _client(self) -> dict | None:
-        """Return the client data by friendly name (prefers connected clients)."""
-        matching_clients = [
-            client for client in self.coordinator._clients.values()
-            if client.get("friendlyName") == self._friendly_name
-        ]
-        if not matching_clients:
-            return None
-        # Prefer connected clients over disconnected ones
-        for client in matching_clients:
-            if not client.get("_disconnected", False):
-                return client
-        # All are disconnected, return the first one
-        return matching_clients[0]
+        """Resolve the display's latest session by stable identity."""
+        return self.coordinator.client_for_device(self._screen_id)
 
     @property
     def device_info(self) -> DeviceInfo:
         """Return device info."""
         return DeviceInfo(
-            identifiers={(DOMAIN, self._friendly_name)},
-            name=self._friendly_name,
+            identifiers={
+                (
+                    DOMAIN,
+                    device_identifier(self.coordinator.entry.entry_id, self._screen_id),
+                )
+            },
+            name=(self._client or {}).get("friendlyName", self._friendly_name),
             manufacturer="Roon Now Playing",
             model="Display Screen",
         )
@@ -105,9 +100,9 @@ class RoonNowPlayingConnectedSensor(
         client = self._client
         if not client:
             return False
-        return not client.get("_disconnected", False)
+        return self.coordinator.is_live(client)
 
     @property
     def available(self) -> bool:
         """Return if entity is available."""
-        return self._client is not None
+        return self.coordinator.can_check_removal

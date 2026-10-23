@@ -1,4 +1,5 @@
 """DataUpdateCoordinator for Roon Now Playing."""
+
 from __future__ import annotations
 
 import asyncio
@@ -7,7 +8,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 import aiohttp
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST
 from homeassistant.core import HomeAssistant
@@ -15,6 +15,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import DOMAIN
+from .identity import device_id, prepare_identity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,15 +39,64 @@ class RoonNowPlayingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._clients: dict[str, dict[str, Any]] = {}
         self._zones: list[dict[str, str]] = []
         self._connected = False
+        self._has_snapshot = False
 
     @property
     def clients(self) -> dict[str, dict[str, Any]]:
-        """Return current clients (only named ones)."""
+        """Return named display sessions, excluding administrative clients."""
         return {
             client_id: client
             for client_id, client in self._clients.items()
-            if client.get("friendlyName")
+            if client.get("friendlyName") and not client.get("isAdmin")
         }
+
+    @property
+    def displays(self) -> dict[str, dict[str, Any]]:
+        """Return the server-selected session per stable display identity."""
+        displays = {}
+        for client in self.clients.values():
+            screen_id = device_id(client)
+            if screen_id is None:
+                continue
+            previous = displays.get(screen_id)
+            if previous is None or not client.get("_disconnected", False):
+                displays[screen_id] = client
+        return displays
+
+    def client_for_device(self, screen_id: str) -> dict[str, Any] | None:
+        """Resolve a current session without using its mutable friendly name."""
+        return self.displays.get(screen_id)
+
+    @property
+    def ready_displays(self) -> dict[str, dict[str, Any]]:
+        """Prepare registries before either platform can create entities."""
+        if not self._has_snapshot:
+            return {}
+        return {
+            screen_id: client
+            for screen_id, client in self.displays.items()
+            if self.is_live(client)
+            and prepare_identity(
+                self.hass,
+                self.entry,
+                screen_id,
+                client["friendlyName"],
+                list(self._clients.values()),
+            )
+        }
+
+    def is_live(self, client: dict[str, Any]) -> bool:
+        """A cached client is not live when the server connection has gone away."""
+        return (
+            self._connected
+            and self._has_snapshot
+            and not client.get("_disconnected", False)
+        )
+
+    @property
+    def can_check_removal(self) -> bool:
+        """Require a complete, current server snapshot before deleting devices."""
+        return self._connected and self._has_snapshot
 
     @property
     def zones(self) -> list[dict[str, str]]:
@@ -77,10 +127,12 @@ class RoonNowPlayingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self._connect_and_listen(session)
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 _LOGGER.warning("WebSocket connection failed: %s", err)
-                self._connected = False
-                self.async_set_updated_data(self._clients)
             except asyncio.CancelledError:
                 break
+            finally:
+                self._connected = False
+                self._has_snapshot = False
+                self.async_set_updated_data(self._clients)
 
             _LOGGER.info("Reconnecting in %s seconds...", RECONNECT_INTERVAL)
             await asyncio.sleep(RECONNECT_INTERVAL)
@@ -93,11 +145,11 @@ class RoonNowPlayingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.info("Connecting to %s", ws_url)
 
         async with session.ws_connect(
-            ws_url,
-            timeout=aiohttp.ClientTimeout(total=30)
+            ws_url, timeout=aiohttp.ClientTimeout(total=30)
         ) as ws:
             self._ws = ws
             self._connected = True
+            self._has_snapshot = False
             _LOGGER.info("WebSocket connected")
 
             async for msg in ws:
@@ -120,43 +172,33 @@ class RoonNowPlayingCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if msg_type == "clients_list":
             # Full refresh of clients
             self._clients = {
-                client["clientId"]: client
-                for client in data.get("clients", [])
+                client["clientId"]: client for client in data.get("clients", [])
             }
+            self._has_snapshot = True
             _LOGGER.debug("Received clients list: %d clients", len(self._clients))
 
-        elif msg_type == "client_connected":
-            # New client connected
+        elif msg_type in ("client_connected", "client_updated"):
+            # The server reports its representative session for this device.
+            # It may switch back to an older session when a newer tab closes.
             client = data.get("client", {})
             client_id = client.get("clientId")
-            friendly_name = client.get("friendlyName")
             if client_id:
-                # Remove old disconnected entries with same friendlyName
-                if friendly_name:
-                    old_ids = [
-                        cid for cid, c in self._clients.items()
-                        if c.get("friendlyName") == friendly_name and c.get("_disconnected")
-                    ]
-                    for old_id in old_ids:
-                        del self._clients[old_id]
+                screen_id = device_id(client)
+                if screen_id and not client.get("isAdmin"):
+                    for previous in self._clients.values():
+                        if (
+                            not previous.get("isAdmin")
+                            and device_id(previous) == screen_id
+                        ):
+                            previous["_disconnected"] = True
                 self._clients[client_id] = client
-                _LOGGER.debug("Client connected: %s", friendly_name or client_id)
+                _LOGGER.debug("Client session updated: %s", client_id)
 
         elif msg_type == "client_disconnected":
-            # Client disconnected
             client_id = data.get("clientId")
             if client_id and client_id in self._clients:
-                # Mark as disconnected but keep in dict for entity updates
                 self._clients[client_id]["_disconnected"] = True
                 _LOGGER.debug("Client disconnected: %s", client_id)
-
-        elif msg_type == "client_updated":
-            # Client settings changed
-            client = data.get("client", {})
-            client_id = client.get("clientId")
-            if client_id:
-                self._clients[client_id] = client
-                _LOGGER.debug("Client updated: %s", client.get("friendlyName", client_id))
 
         elif msg_type == "zones":
             # Zone list updated
