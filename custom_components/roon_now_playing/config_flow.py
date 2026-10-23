@@ -1,4 +1,5 @@
 """Config flow for Roon Now Playing integration."""
+
 from __future__ import annotations
 
 import logging
@@ -6,7 +7,6 @@ from typing import Any
 
 import aiohttp
 import voluptuous as vol
-
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_HOST
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -25,7 +25,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 class RoonNowPlayingConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Roon Now Playing."""
 
-    VERSION = 1
+    VERSION = 2
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
