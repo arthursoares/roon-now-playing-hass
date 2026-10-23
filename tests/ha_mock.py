@@ -82,7 +82,7 @@ class RegistryStore:
     def update_entity(self, entity_id, *, new_unique_id):
         old = self.entities[entity_id]
         collision = self.get_entity_id(old.domain, old.platform, new_unique_id)
-        if collision and collision != entity_id:
+        if collision is not None:
             raise ValueError("unique ID collision")
         self.entities[entity_id] = replace(old, unique_id=new_unique_id)
         return self.entities[entity_id]

@@ -227,7 +227,8 @@ def prepare_identity(
         )
         if old_collision is not None and old_collision != entity.entity_id:
             return defer("legacy entity belongs to another device")
-        updates.append((entity.entity_id, target))
+        if entity.unique_id != target:
+            updates.append((entity.entity_id, target))
 
     # Only the identity changes: entity_id/name/disabled_by/options are retained.
     for entity_id, target in updates:

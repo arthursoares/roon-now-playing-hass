@@ -299,13 +299,89 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.store.dr.async_update_device.assert_not_called()
 
     async def test_partially_updated_entities_can_resume(self):
+        for migrated_count in (1, 5):
+            with self.subTest(migrated_count=migrated_count):
+                self.setUp()
+                before_device = self.legacy()
+                expected = {
+                    entity_id: replace(
+                        old,
+                        unique_id=entity_unique_id(
+                            "entry", "screen", old.unique_id.rsplit("_", 1)[1]
+                        ),
+                    )
+                    for entity_id, old in self.store.entities.items()
+                }
+                completed = list(expected)[:migrated_count]
+                for entity_id in completed:
+                    self.store.entities[entity_id] = expected[entity_id]
+
+                self.assertTrue(self.prepare())
+                self.assertEqual(self.store.entities, expected)
+                self.assertEqual(
+                    self.store.devices,
+                    {
+                        "old": replace(
+                            before_device,
+                            identifiers={
+                                (DOMAIN, device_identifier("entry", "screen"))
+                            },
+                        )
+                    },
+                )
+                self.assertEqual(
+                    self.store.er.async_update_entity.call_count, 5 - migrated_count
+                )
+                updated = {
+                    call.args[0]
+                    for call in self.store.er.async_update_entity.call_args_list
+                }
+                self.assertEqual(updated, set(expected) - set(completed))
+                self.assertTrue(self.prepare())
+                self.assertEqual(self.store.entities, expected)
+                self.assertEqual(
+                    self.store.er.async_update_entity.call_count, 5 - migrated_count
+                )
+
+    async def test_partial_migration_conflicts_defer_without_changes(self):
+        for migrated_count, conflict in ((1, "target"), (1, "legacy"), (5, "legacy")):
+            with self.subTest(migrated_count=migrated_count, conflict=conflict):
+                self.setUp()
+                self.legacy()
+                for entity_id, old in list(self.store.entities.items())[
+                    :migrated_count
+                ]:
+                    self.store.entities[entity_id] = replace(
+                        old,
+                        unique_id=entity_unique_id(
+                            "entry", "screen", old.unique_id.rsplit("_", 1)[1]
+                        ),
+                    )
+                self.store.entities["select.conflict"] = RegistryEntry(
+                    "select.conflict",
+                    entity_unique_id("entry", "screen", "zone")
+                    if conflict == "target"
+                    else "screen_layout",
+                    "other" if conflict == "target" else "old",
+                )
+                before_entities = self.store.entities.copy()
+                before_devices = self.store.devices.copy()
+                self.assertFalse(self.prepare())
+                self.assertEqual(self.store.entities, before_entities)
+                self.assertEqual(self.store.devices, before_devices)
+                self.store.er.async_update_entity.assert_not_called()
+                self.store.dr.async_update_device.assert_not_called()
+
+    def test_entity_registry_mock_rejects_existing_unique_ids(self):
         self.legacy()
-        old = self.store.entities["select.custom_old_zone"]
-        self.store.entities[old.entity_id] = replace(
-            old, unique_id=entity_unique_id("entry", "screen", "zone")
-        )
-        self.assertTrue(self.prepare())
-        self.assertEqual(len(self.store.entities), 5)
+        before = self.store.entities.copy()
+        for unique_id in ("screen_layout", "screen_font"):
+            with self.subTest(unique_id=unique_id):
+                with self.assertRaises(ValueError):
+                    self.store.er.async_update_entity(
+                        "select.custom_old_layout", new_unique_id=unique_id
+                    )
+                self.assertEqual(self.store.entities, before)
 
     async def test_shared_legacy_device_defers(self):
         old = self.legacy()
